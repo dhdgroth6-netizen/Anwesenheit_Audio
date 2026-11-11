@@ -1,0 +1,10 @@
+# Build-Ausgaben
+build/
+dist/
+installer/
+*.spec
+__pycache__/
+*.pyc
+
+# Persönliche Einstellungen (liegen normalerweise in %APPDATA%)
+einstellungen.json

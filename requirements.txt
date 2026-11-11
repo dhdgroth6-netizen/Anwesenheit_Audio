@@ -1,0 +1,6 @@
+opencv-python>=4.8,<5
+pycaw
+comtypes
+pygrabber
+pystray
+pillow
