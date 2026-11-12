@@ -11,7 +11,8 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk
-from ctypes import c_int, c_wchar_p
+import ctypes
+from ctypes import c_int, c_wchar_p, wintypes
 
 import cv2
 import comtypes
@@ -25,7 +26,9 @@ CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "A
 CONFIG_FILE = os.path.join(CONFIG_DIR, "einstellungen.json")
 INSTANCE_PORT = 47863  # lokaler Port, damit nur eine Instanz läuft
 
-COLORS = {"present": "#2e9e44", "absent": "#e08a00", "problem": "#e02020", "unknown": "#888888"}
+COLORS = {"present": "#2e9e44", "absent": "#e08a00", "problem": "#e02020", "unknown": "#888888",
+          "paused": "#3a7bd5"}
+DEFAULT_HOTKEY = {"mods": 0x2 | 0x1 | 0x4, "vk": 0x4D, "text": "Strg+Alt+Umschalt+M"}  # Strg|Alt|Umschalt + M
 OVERLAY_SIZES = {"Klein": 16, "Mittel": 24, "Groß": 36}
 
 
@@ -201,6 +204,37 @@ class Detector(threading.Thread):
         cap.release()
 
 
+# ---------------------------------------------------------------- Tastenkombination
+class HotkeyListener(threading.Thread):
+    """Globale Tastenkombination (funktioniert auch, wenn das Fenster nicht im Vordergrund ist)."""
+    WM_HOTKEY, WM_QUIT, MOD_NOREPEAT = 0x0312, 0x0012, 0x4000
+
+    def __init__(self, mods, vk, callback):
+        super().__init__(daemon=True)
+        self.mods, self.vk, self.callback = mods, vk, callback
+        self.ok = False
+        self.thread_id = None
+        self.ready = threading.Event()
+
+    def run(self):
+        user32 = ctypes.windll.user32
+        self.thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        self.ok = bool(user32.RegisterHotKey(None, 1, self.mods | self.MOD_NOREPEAT, self.vk))
+        self.ready.set()
+        if not self.ok:
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == self.WM_HOTKEY:
+                self.callback()
+        user32.UnregisterHotKey(None, 1)
+
+    def stop(self):
+        self.ready.wait(2)
+        if self.ok and self.thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self.thread_id, self.WM_QUIT, 0, 0)
+
+
 # ---------------------------------------------------------------- Overlay
 class Overlay:
     """Kleiner, immer sichtbarer Punkt: grün = anwesend, orange = abwesend,
@@ -322,34 +356,55 @@ class App:
         self.delay_back = tk.IntVar(value=self.cfg.get("delay_back", 1))
         ttk.Spinbox(f, from_=0, to=60, textvariable=self.delay_back, width=8).grid(row=4, column=1, sticky="w", **pad)
 
-        ttk.Label(f, text="Empfindlichkeit:").grid(row=5, column=0, sticky="w", **pad)
-        sf = ttk.Frame(f)
-        sf.grid(row=5, column=1, sticky="w", **pad)
-        self.sens = tk.IntVar(value=self.cfg.get("sensitivity", 6))
-        scale = ttk.Scale(sf, from_=1, to=10, length=160,
-                          command=lambda v: self.sens.set(round(float(v))))
-        scale.set(self.sens.get())
-        scale.grid(row=0, column=0)
-        self.sens_scale = scale
-        self.sens_label = ttk.Label(sf, text=str(self.sens.get()), width=3)
-        self.sens_label.grid(row=0, column=1, padx=6)
-        ttk.Label(sf, text="höher = auch stark gedrehter Kopf", foreground="gray").grid(row=0, column=2)
+        self.active = tk.BooleanVar(value=self.cfg.get("active", True))
+        self.active_flag = self.active.get()  # Kopie für den Tray-Thread
+        ttk.Checkbutton(f, text="Automatisch umschalten", variable=self.active).grid(row=5, column=1, sticky="w", **pad)
+        ttk.Button(f, text="Geräte neu laden", command=self.refresh).grid(row=5, column=0, sticky="w", **pad)
 
-        ttk.Label(f, text="Mindestgröße Gesicht:").grid(row=6, column=0, sticky="w", **pad)
-        mf = ttk.Frame(f)
-        mf.grid(row=6, column=1, sticky="w", **pad)
+        # --- Erweiterte Einstellungen (ausklappbar)
+        self.adv_toggle = ttk.Button(f, text="▶ Erweiterte Einstellungen", command=self.toggle_advanced)
+        self.adv_toggle.grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 0))
+        adv = ttk.Frame(f, padding=6, relief="groove", borderwidth=2)
+        adv.grid(row=7, column=0, columnspan=2, sticky="we", padx=8, pady=(4, 4))
+        self.adv_frame = adv
+
+        ttk.Label(adv, text="Empfindlichkeit:").grid(row=0, column=0, sticky="w", padx=4, pady=3)
+        self.sens = tk.IntVar(value=self.cfg.get("sensitivity", 6))
+        self.sens_scale = ttk.Scale(adv, from_=1, to=10, length=160,
+                                    command=lambda v: self.sens.set(round(float(v))))
+        self.sens_scale.set(self.sens.get())
+        self.sens_scale.grid(row=0, column=1, sticky="w")
+        self.sens_label = ttk.Label(adv, text=str(self.sens.get()), width=3)
+        self.sens_label.grid(row=0, column=2, padx=6)
+        ttk.Label(adv, text="höher = auch stark gedrehter Kopf", foreground="gray").grid(row=0, column=3, sticky="w")
+
+        ttk.Label(adv, text="Mindestgröße Gesicht:").grid(row=1, column=0, sticky="w", padx=4, pady=3)
         self.min_size = tk.IntVar(value=self.cfg.get("min_face_size", 9))
-        self.min_scale = ttk.Scale(mf, from_=1, to=30, length=160,
+        self.min_scale = ttk.Scale(adv, from_=1, to=30, length=160,
                                    command=lambda v: self.min_size.set(round(float(v))))
         self.min_scale.set(self.min_size.get())
-        self.min_scale.grid(row=0, column=0)
-        self.min_label = ttk.Label(mf, text=str(self.min_size.get()), width=3)
-        self.min_label.grid(row=0, column=1, padx=6)
-        ttk.Label(mf, text="höher = Personen im Hintergrund ignorieren", foreground="gray").grid(row=0, column=2)
+        self.min_scale.grid(row=1, column=1, sticky="w")
+        self.min_label = ttk.Label(adv, text=str(self.min_size.get()), width=3)
+        self.min_label.grid(row=1, column=2, padx=6)
+        ttk.Label(adv, text="höher = Personen im Hintergrund ignorieren", foreground="gray").grid(row=1, column=3, sticky="w")
 
-        self.active = tk.BooleanVar(value=self.cfg.get("active", True))
-        ttk.Checkbutton(f, text="Automatisch umschalten", variable=self.active).grid(row=7, column=1, sticky="w", **pad)
-        ttk.Button(f, text="Geräte neu laden", command=self.refresh).grid(row=7, column=0, sticky="w", **pad)
+        ttk.Label(adv, text="Tastenkombination:").grid(row=2, column=0, sticky="w", padx=4, pady=3)
+        self.hotkey = self.cfg.get("hotkey", DEFAULT_HOTKEY)
+        self.hotkey_var = tk.StringVar()
+        hk = ttk.Frame(adv)
+        hk.grid(row=2, column=1, columnspan=3, sticky="w")
+        ttk.Entry(hk, textvariable=self.hotkey_var, state="readonly", width=24).grid(row=0, column=0)
+        self.hotkey_btn = ttk.Button(hk, text="Ändern", command=self.capture_hotkey)
+        self.hotkey_btn.grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(hk, text="Entfernen", command=lambda: self.set_hotkey(None)).grid(row=0, column=2, padx=(6, 0))
+        self.hotkey_info = ttk.Label(adv, foreground="gray")
+        self.hotkey_info.grid(row=3, column=1, columnspan=3, sticky="w")
+        self.hotkey_listener = None
+        self.capturing = False
+        if not self.cfg.get("advanced_open", False):
+            adv.grid_remove()
+        else:
+            self.adv_toggle.config(text="▼ Erweiterte Einstellungen")
 
         # --- Overlay-Einstellungen
         of = ttk.LabelFrame(f, text="Overlay", padding=6)
@@ -363,7 +418,7 @@ class App:
         sb.grid(row=0, column=2, sticky="w")
         sb.bind("<<ComboboxSelected>>", lambda e: self.apply_overlay())
         ttk.Button(of, text="Position zurücksetzen", command=self.reset_overlay).grid(row=0, column=3, padx=(12, 0))
-        ttk.Label(of, text="Grün = anwesend · Orange = abwesend · Rot blinkend = Problem. "
+        ttk.Label(of, text="Grün = anwesend · Orange = abwesend · Blau = Umschalten pausiert · Rot blinkend = Problem. "
                            "Ziehen zum Verschieben, Doppelklick öffnet dieses Fenster.",
                   foreground="gray", wraplength=420).grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=(4, 0))
 
@@ -380,6 +435,7 @@ class App:
                   self.min_size):
             v.trace_add("write", lambda *a: self.save_cfg())
         self.sens.trace_add("write", lambda *a: self.apply_sensitivity())
+        self.active.trace_add("write", lambda *a: self.on_active_changed())
         self.min_size.trace_add("write", lambda *a: self.apply_sensitivity())
         self.pending_inputs = None
         self.refreshing = False
@@ -390,11 +446,14 @@ class App:
             "anwesenheit_audio", self.icons["unknown"], APP_NAME,
             menu=pystray.Menu(
                 pystray.MenuItem("Öffnen", lambda: self.commands.put("show"), default=True),
+                pystray.MenuItem("Automatisch umschalten", lambda: self.commands.put("toggle"),
+                                 checked=lambda item: self.active_flag),
                 pystray.MenuItem("Beenden", lambda: self.commands.put("quit")),
             ))
 
         self.refresh()
         self.apply_overlay()
+        self.set_hotkey(self.hotkey, save=False)
         root.protocol("WM_DELETE_WINDOW", self.hide)
         self.tray.run_detached()
         self.tick()
@@ -413,6 +472,96 @@ class App:
 
     def visible(self):
         return self.root.state() != "withdrawn"
+
+    # --- Erweiterte Einstellungen / Tastenkombination
+    def toggle_advanced(self):
+        is_open = self.adv_frame.winfo_ismapped()
+        if is_open:
+            self.adv_frame.grid_remove()
+        else:
+            self.adv_frame.grid()
+        self.adv_toggle.config(text=("▶" if is_open else "▼") + " Erweiterte Einstellungen")
+        self.cfg["advanced_open"] = not is_open
+        self.save_cfg()
+
+    def toggle_active(self):
+        self.active.set(not self.active.get())
+        try:
+            self.tray.notify("Automatisches Umschalten " + ("eingeschaltet" if self.active.get() else "pausiert"),
+                             APP_NAME)
+        except Exception:
+            pass
+
+    def on_active_changed(self):
+        self.active_flag = bool(self.active.get())
+        try:
+            self.tray.update_menu()
+        except Exception:
+            pass
+
+    def set_hotkey(self, hotkey, save=True):
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
+            self.hotkey_listener = None
+        self.hotkey = hotkey
+        if not hotkey:
+            self.hotkey_var.set("(keine)")
+            self.hotkey_info.config(text="Keine Tastenkombination gesetzt.", foreground="gray")
+        else:
+            self.hotkey_var.set(hotkey["text"])
+            lst = HotkeyListener(hotkey["mods"], hotkey["vk"], lambda: self.commands.put("toggle"))
+            lst.start()
+            lst.ready.wait(2)
+            if lst.ok:
+                self.hotkey_listener = lst
+                self.hotkey_info.config(text="Schaltet das automatische Umschalten an/aus – funktioniert überall.",
+                                        foreground="gray")
+            else:
+                self.hotkey_info.config(text="Diese Kombination wird schon von einem anderen Programm benutzt.",
+                                        foreground=COLORS["problem"])
+        if save:
+            self.save_cfg()
+
+    def capture_hotkey(self):
+        if self.capturing:
+            return
+        self.capturing = True
+        if self.hotkey_listener:  # alte Kombination beim Aufnehmen nicht auslösen
+            self.hotkey_listener.stop()
+            self.hotkey_listener = None
+        self.hotkey_var.set("Tasten drücken…")
+        self.hotkey_info.config(text="Z. B. Strg+Alt+M drücken. Esc = abbrechen.", foreground="gray")
+        self.root.bind("<KeyPress>", self.on_capture_key)
+        self.root.focus_force()
+
+    def on_capture_key(self, e):
+        modifiers = ("Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R", "Win_L", "Win_R")
+        if e.keysym in modifiers:
+            return "break"
+        self.root.unbind("<KeyPress>")
+        self.capturing = False
+        if e.keysym == "Escape":
+            self.set_hotkey(self.hotkey, save=False)
+            return "break"
+        mods, names = 0, []
+        if e.state & 0x4:
+            mods |= 0x2
+            names.append("Strg")
+        if e.state & 0x20000:
+            mods |= 0x1
+            names.append("Alt")
+        if e.state & 0x1:
+            mods |= 0x4
+            names.append("Umschalt")
+        key = e.keysym.upper() if len(e.keysym) == 1 else e.keysym
+        is_fkey = key.startswith("F") and key[1:].isdigit()
+        if not mods and not is_fkey:
+            self.set_hotkey(self.hotkey, save=False)
+            self.hotkey_info.config(text="Bitte mit Strg, Alt oder Umschalt kombinieren (oder eine F-Taste).",
+                                    foreground=COLORS["problem"])
+            return "break"
+        self.set_hotkey({"mods": mods, "vk": e.keycode, "text": "+".join(names + [key])})
+        return "break"
 
     # --- Overlay
     def apply_overlay(self):
@@ -456,6 +605,7 @@ class App:
                 "overlay_size": self.ov_size.get(),
                 "sensitivity": int(self.sens.get()),
                 "min_face_size": int(self.min_size.get()),
+                "hotkey": self.hotkey,
             })
         except (tk.TclError, ValueError):
             return  # z.B. leeres Zahlenfeld während der Eingabe
@@ -582,6 +732,8 @@ class App:
             cmd = self.commands.get()
             if cmd == "show":
                 self.show()
+            elif cmd == "toggle":
+                self.toggle_active()
             elif cmd == "quit":
                 self.close()
                 return
@@ -646,6 +798,9 @@ class App:
             state, text = "problem", "Keine Kamera gefunden"
         elif d.error:
             state, text = "problem", d.error
+        elif not self.active.get():
+            who = "" if self.present is None else (" – anwesend" if self.present else " – abwesend")
+            state, text = "paused", "Umschalten pausiert" + who
         elif self.switch_error:
             state, text = "problem", self.switch_error
         elif self.present is None:
@@ -665,6 +820,8 @@ class App:
         if self.detector:
             self.detector.running = False
         self.save_cfg()
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
         try:
             self.tray.stop()
         except Exception:
