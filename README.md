@@ -12,11 +12,13 @@ Die Webcam erkennt dein Gesicht. Bist du da, wird z. B. dein Tischmikrofon zum W
 - Anwesenheitserkennung per Webcam (Gesichtserkennung mit dem YuNet-Modell von OpenCV – erkennt auch seitlich gedrehte Köpfe)
 - Freie Wahl von Kamera, Mikrofon für „anwesend“ und Mikrofon für „abwesend“
 - Einstellbare Verzögerungen (wann gilt man als weg / wieder da)
-- **Tastenkombination** (Standard: `Strg+Alt+Umschalt+M`), um das automatische Umschalten jederzeit zu pausieren und wieder einzuschalten – funktioniert auch, wenn das Fenster geschlossen ist
+- **Tastenkombinationen** – funktionieren überall, auch wenn das Fenster geschlossen ist:
+  - `Strg+Alt+Umschalt+M`: automatisches Umschalten pausieren / wieder einschalten
+  - `Strg+Alt+Umschalt+U`: manuell zum jeweils anderen Mikrofon wechseln (pausiert dabei das automatische Umschalten)
 - Unter **Erweiterte Einstellungen**:
   - **Empfindlichkeit**: wie stark der Kopf gedreht sein darf
   - **Mindestgröße Gesicht**: ignoriert Personen im Hintergrund
-  - **Tastenkombination** frei wählbar
+  - **Tastenkombinationen** frei wählbar
 - Kleines **Overlay** (immer im Vordergrund): grün = anwesend, orange = abwesend, blau = Umschalten pausiert, rot blinkend = Problem
 - Läuft im Hintergrund mit Tray-Symbol, optional Autostart mit Windows
 - Startet die Kamera automatisch neu, falls sie hängen bleibt
@@ -44,6 +46,7 @@ Hinweis: Solange das Programm läuft, ist die Kamera in Benutzung (die Kamera-LE
 | Schließen (X) | Fenster wird ausgeblendet, Programm läuft im Hintergrund weiter |
 | Tray-Symbol | Klick öffnet das Fenster, Rechtsklick → *Automatisch umschalten* an/aus oder *Beenden* |
 | `Strg+Alt+Umschalt+M` | Automatisches Umschalten pausieren / wieder einschalten (änderbar unter *Erweiterte Einstellungen*) |
+| `Strg+Alt+Umschalt+U` | Manuell zum anderen Mikrofon wechseln, automatisches Umschalten wird pausiert (änderbar) |
 | Overlay | Ziehen zum Verschieben, Doppelklick öffnet das Fenster |
 | Zahl „Gr.“ in der Vorschau | Breite des Gesichts in % der Bildbreite – hilft beim Einstellen der Mindestgröße |
 
@@ -75,7 +78,7 @@ Das Setzen des Standard-Aufnahmegeräts nutzt die nicht offiziell dokumentierte 
 **Automatically switches your default microphone depending on whether you are sitting at your PC.**
 Your webcam detects your face. While you are present, e.g. your desk microphone becomes the Windows default recording device; when you leave, it switches to e.g. your wireless headset.
 
-**Features:** webcam presence detection (OpenCV YuNet face detector, works with turned heads) · choose camera and microphones for "present"/"away" · adjustable delays · global hotkey to pause/resume switching (default `Ctrl+Alt+Shift+M`) · sensitivity and minimum face size (ignores people in the background) · small always-on-top status overlay (green / orange / blue = paused / blinking red on problems) · runs in the system tray, optional autostart · automatic camera restart if it hangs.
+**Features:** webcam presence detection (OpenCV YuNet face detector, works with turned heads) · choose camera and microphones for "present"/"away" · adjustable delays · global hotkeys to pause/resume switching (`Ctrl+Alt+Shift+M`) and to switch manually to the other microphone (`Ctrl+Alt+Shift+U`, also pauses automatic switching) · sensitivity and minimum face size (ignores people in the background) · small always-on-top status overlay (green / orange / blue = paused / blinking red on problems) · runs in the system tray, optional autostart · automatic camera restart if it hangs.
 
 **Privacy:** the camera image is processed **locally only**. Nothing is stored, recorded or sent anywhere.
 

@@ -1,7 +1,7 @@
 ﻿; Installer für "Anwesenheit Audio" (Inno Setup 6)
 #define AppName "Anwesenheit Audio"
 #define AppExe "AnwesenheitAudio.exe"
-#define AppVersion "1.1"
+#define AppVersion "1.2"
 
 [Setup]
 AppId={{6B1D5C3E-8F2A-4A7B-9C41-AA0D2E7F3B10}

@@ -28,7 +28,15 @@ INSTANCE_PORT = 47863  # lokaler Port, damit nur eine Instanz läuft
 
 COLORS = {"present": "#2e9e44", "absent": "#e08a00", "problem": "#e02020", "unknown": "#888888",
           "paused": "#3a7bd5"}
-DEFAULT_HOTKEY = {"mods": 0x2 | 0x1 | 0x4, "vk": 0x4D, "text": "Strg+Alt+Umschalt+M"}  # Strg|Alt|Umschalt + M
+DEFAULT_HOTKEYS = {  # Strg|Alt|Umschalt + Taste
+    "toggle": {"mods": 0x2 | 0x1 | 0x4, "vk": 0x4D, "text": "Strg+Alt+Umschalt+M"},
+    "manual": {"mods": 0x2 | 0x1 | 0x4, "vk": 0x55, "text": "Strg+Alt+Umschalt+U"},
+}
+HOTKEY_INFO = {
+    "toggle": "Schaltet das automatische Umschalten an/aus.",
+    "manual": "Wechselt zwischen den beiden Mikrofonen und pausiert das automatische Umschalten.",
+}
+CFG_KEYS = {"toggle": "hotkey", "manual": "hotkey_manual"}
 OVERLAY_SIZES = {"Klein": 16, "Mittel": 24, "Groß": 36}
 
 
@@ -388,19 +396,21 @@ class App:
         self.min_label.grid(row=1, column=2, padx=6)
         ttk.Label(adv, text="höher = Personen im Hintergrund ignorieren", foreground="gray").grid(row=1, column=3, sticky="w")
 
-        ttk.Label(adv, text="Tastenkombination:").grid(row=2, column=0, sticky="w", padx=4, pady=3)
-        self.hotkey = self.cfg.get("hotkey", DEFAULT_HOTKEY)
-        self.hotkey_var = tk.StringVar()
-        hk = ttk.Frame(adv)
-        hk.grid(row=2, column=1, columnspan=3, sticky="w")
-        ttk.Entry(hk, textvariable=self.hotkey_var, state="readonly", width=24).grid(row=0, column=0)
-        self.hotkey_btn = ttk.Button(hk, text="Ändern", command=self.capture_hotkey)
-        self.hotkey_btn.grid(row=0, column=1, padx=(6, 0))
-        ttk.Button(hk, text="Entfernen", command=lambda: self.set_hotkey(None)).grid(row=0, column=2, padx=(6, 0))
-        self.hotkey_info = ttk.Label(adv, foreground="gray")
-        self.hotkey_info.grid(row=3, column=1, columnspan=3, sticky="w")
-        self.hotkey_listener = None
-        self.capturing = False
+        self.hotkeys, self.hotkey_vars, self.hotkey_infos, self.hotkey_listeners = {}, {}, {}, {}
+        self.capturing = None
+        for row, (name, label) in enumerate((("toggle", "Taste: Auto an/aus:"),
+                                             ("manual", "Taste: Manuell wechseln:"))):
+            r = 2 + row * 2
+            ttk.Label(adv, text=label).grid(row=r, column=0, sticky="w", padx=4, pady=(6, 0))
+            self.hotkeys[name] = self.cfg.get(CFG_KEYS[name], DEFAULT_HOTKEYS[name])
+            self.hotkey_vars[name] = tk.StringVar()
+            hk = ttk.Frame(adv)
+            hk.grid(row=r, column=1, columnspan=3, sticky="w", pady=(6, 0))
+            ttk.Entry(hk, textvariable=self.hotkey_vars[name], state="readonly", width=24).grid(row=0, column=0)
+            ttk.Button(hk, text="Ändern", command=lambda n=name: self.capture_hotkey(n)).grid(row=0, column=1, padx=(6, 0))
+            ttk.Button(hk, text="Entfernen", command=lambda n=name: self.set_hotkey(n, None)).grid(row=0, column=2, padx=(6, 0))
+            self.hotkey_infos[name] = ttk.Label(adv, foreground="gray", wraplength=400)
+            self.hotkey_infos[name].grid(row=r + 1, column=1, columnspan=3, sticky="w")
         if not self.cfg.get("advanced_open", False):
             adv.grid_remove()
         else:
@@ -418,7 +428,7 @@ class App:
         sb.grid(row=0, column=2, sticky="w")
         sb.bind("<<ComboboxSelected>>", lambda e: self.apply_overlay())
         ttk.Button(of, text="Position zurücksetzen", command=self.reset_overlay).grid(row=0, column=3, padx=(12, 0))
-        ttk.Label(of, text="Grün = anwesend · Orange = abwesend · Blau = Umschalten pausiert · Rot blinkend = Problem. "
+        ttk.Label(of, text="Grün = anwesend · Orange = abwesend · Blau = automatisches Umschalten pausiert · Rot blinkend = Problem. "
                            "Ziehen zum Verschieben, Doppelklick öffnet dieses Fenster.",
                   foreground="gray", wraplength=420).grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=(4, 0))
 
@@ -453,7 +463,8 @@ class App:
 
         self.refresh()
         self.apply_overlay()
-        self.set_hotkey(self.hotkey, save=False)
+        for name in self.hotkeys:
+            self.set_hotkey(name, self.hotkeys[name], save=False)
         root.protocol("WM_DELETE_WINDOW", self.hide)
         self.tray.run_detached()
         self.tick()
@@ -499,49 +510,83 @@ class App:
         except Exception:
             pass
 
-    def set_hotkey(self, hotkey, save=True):
-        if self.hotkey_listener:
-            self.hotkey_listener.stop()
-            self.hotkey_listener = None
-        self.hotkey = hotkey
+    def manual_switch(self):
+        """Wechselt zum jeweils anderen Mikrofon und pausiert das automatische Umschalten."""
+        present_name, absent_name = self.in_present.get(), self.in_absent.get()
+        try:
+            current = AudioUtilities.GetMicrophone().GetId()
+        except Exception:
+            current = None
+        target = absent_name if current and self.inputs.get(present_name) == current else present_name
+        if self.active.get():
+            self.active.set(False)
+        dev_id = self.inputs.get(target)
+        try:
+            if not dev_id:
+                raise RuntimeError(f"Mikrofon nicht gefunden: {target or '(nicht ausgewählt)'}")
+            set_default_input(dev_id)
+            msg = f"Manuell gewechselt auf: {target}\nAutomatisches Umschalten pausiert"
+        except Exception as e:
+            msg = f"Manueller Wechsel fehlgeschlagen: {e}"
+        try:
+            self.tray.notify(msg, APP_NAME)
+        except Exception:
+            pass
+
+    def set_hotkey(self, name, hotkey, save=True):
+        old = self.hotkey_listeners.pop(name, None)
+        if old:
+            old.stop()
+        self.hotkeys[name] = hotkey
+        var, info = self.hotkey_vars[name], self.hotkey_infos[name]
+        other = [n for n, h in self.hotkeys.items() if n != name and h and hotkey
+                 and (h["mods"], h["vk"]) == (hotkey["mods"], hotkey["vk"])]
         if not hotkey:
-            self.hotkey_var.set("(keine)")
-            self.hotkey_info.config(text="Keine Tastenkombination gesetzt.", foreground="gray")
+            var.set("(keine)")
+            info.config(text="Keine Tastenkombination gesetzt.", foreground="gray")
+        elif other:
+            var.set(hotkey["text"])
+            info.config(text="Diese Kombination ist schon für die andere Funktion vergeben.",
+                        foreground=COLORS["problem"])
         else:
-            self.hotkey_var.set(hotkey["text"])
-            lst = HotkeyListener(hotkey["mods"], hotkey["vk"], lambda: self.commands.put("toggle"))
+            var.set(hotkey["text"])
+            lst = HotkeyListener(hotkey["mods"], hotkey["vk"], lambda: self.commands.put(name))
             lst.start()
             lst.ready.wait(2)
             if lst.ok:
-                self.hotkey_listener = lst
-                self.hotkey_info.config(text="Schaltet das automatische Umschalten an/aus – funktioniert überall.",
-                                        foreground="gray")
+                self.hotkey_listeners[name] = lst
+                info.config(text=HOTKEY_INFO[name] + " Funktioniert überall.", foreground="gray")
             else:
-                self.hotkey_info.config(text="Diese Kombination wird schon von einem anderen Programm benutzt.",
-                                        foreground=COLORS["problem"])
+                info.config(text="Diese Kombination wird schon von einem anderen Programm benutzt.",
+                            foreground=COLORS["problem"])
         if save:
             self.save_cfg()
 
-    def capture_hotkey(self):
+    def capture_hotkey(self, name):
         if self.capturing:
             return
-        self.capturing = True
-        if self.hotkey_listener:  # alte Kombination beim Aufnehmen nicht auslösen
-            self.hotkey_listener.stop()
-            self.hotkey_listener = None
-        self.hotkey_var.set("Tasten drücken…")
-        self.hotkey_info.config(text="Z. B. Strg+Alt+M drücken. Esc = abbrechen.", foreground="gray")
+        self.capturing = name
+        for lst in self.hotkey_listeners.values():  # beim Aufnehmen keine Kombination auslösen
+            lst.stop()
+        self.hotkey_listeners.clear()
+        self.hotkey_vars[name].set("Tasten drücken…")
+        self.hotkey_infos[name].config(text="Z. B. Strg+Alt+M drücken. Esc = abbrechen.", foreground="gray")
         self.root.bind("<KeyPress>", self.on_capture_key)
         self.root.focus_force()
+
+    def restore_hotkeys(self, except_name=None):
+        for n, h in self.hotkeys.items():
+            if n != except_name:
+                self.set_hotkey(n, h, save=False)
 
     def on_capture_key(self, e):
         modifiers = ("Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R", "Win_L", "Win_R")
         if e.keysym in modifiers:
             return "break"
         self.root.unbind("<KeyPress>")
-        self.capturing = False
+        name, self.capturing = self.capturing, None
         if e.keysym == "Escape":
-            self.set_hotkey(self.hotkey, save=False)
+            self.restore_hotkeys()
             return "break"
         mods, names = 0, []
         if e.state & 0x4:
@@ -556,11 +601,12 @@ class App:
         key = e.keysym.upper() if len(e.keysym) == 1 else e.keysym
         is_fkey = key.startswith("F") and key[1:].isdigit()
         if not mods and not is_fkey:
-            self.set_hotkey(self.hotkey, save=False)
-            self.hotkey_info.config(text="Bitte mit Strg, Alt oder Umschalt kombinieren (oder eine F-Taste).",
-                                    foreground=COLORS["problem"])
+            self.restore_hotkeys()
+            self.hotkey_infos[name].config(text="Bitte mit Strg, Alt oder Umschalt kombinieren (oder eine F-Taste).",
+                                           foreground=COLORS["problem"])
             return "break"
-        self.set_hotkey({"mods": mods, "vk": e.keycode, "text": "+".join(names + [key])})
+        self.restore_hotkeys(except_name=name)
+        self.set_hotkey(name, {"mods": mods, "vk": e.keycode, "text": "+".join(names + [key])})
         return "break"
 
     # --- Overlay
@@ -605,7 +651,8 @@ class App:
                 "overlay_size": self.ov_size.get(),
                 "sensitivity": int(self.sens.get()),
                 "min_face_size": int(self.min_size.get()),
-                "hotkey": self.hotkey,
+                "hotkey": self.hotkeys["toggle"],
+                "hotkey_manual": self.hotkeys["manual"],
             })
         except (tk.TclError, ValueError):
             return  # z.B. leeres Zahlenfeld während der Eingabe
@@ -734,6 +781,8 @@ class App:
                 self.show()
             elif cmd == "toggle":
                 self.toggle_active()
+            elif cmd == "manual":
+                self.manual_switch()
             elif cmd == "quit":
                 self.close()
                 return
@@ -820,8 +869,8 @@ class App:
         if self.detector:
             self.detector.running = False
         self.save_cfg()
-        if self.hotkey_listener:
-            self.hotkey_listener.stop()
+        for lst in self.hotkey_listeners.values():
+            lst.stop()
         try:
             self.tray.stop()
         except Exception:
